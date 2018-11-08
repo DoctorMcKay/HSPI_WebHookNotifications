@@ -145,7 +145,6 @@ namespace HSPI_WebHookNotifications
 			
 			PageBuilderAndMenu.clsPageBuilder pageBuilder = new PageBuilderAndMenu.clsPageBuilder(pageName);
 			pageBuilder.reset();
-			pageBuilder.AddTitleBar("WebHook Notifications Settings", user, true, "", false, false, false, false);
 			pageBuilder.AddHeader(hs.GetPageHeader(pageName, "WebHook Notifications Settings", "", "", false, true));
 			pageBuilder.AddBody(stringBuilder.ToString());
 			pageBuilder.AddFooter(hs.GetPageFooter());
