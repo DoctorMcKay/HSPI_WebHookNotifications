@@ -50,6 +50,20 @@ namespace HSPI_WebHookNotifications
 			return "";
 		}
 
+		public override IPlugInAPI.strInterfaceStatus InterfaceStatus() {
+			if (string.IsNullOrEmpty(webhookEndpoint)) {
+				return new IPlugInAPI.strInterfaceStatus {
+					intStatus = IPlugInAPI.enumInterfaceStatus.WARNING,
+					sStatus = "No WebHook URL is configured"
+				};
+			}
+			
+			// all gud
+			return new IPlugInAPI.strInterfaceStatus {
+				intStatus = IPlugInAPI.enumInterfaceStatus.OK
+			};
+		}
+
 		public override void HSEvent(Enums.HSEvent eventType, object[] parameters) {
 			if (string.IsNullOrEmpty(webhookEndpoint)) {
 				Program.WriteLog("debug",
