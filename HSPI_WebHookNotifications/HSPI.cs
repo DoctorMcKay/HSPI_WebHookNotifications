@@ -13,6 +13,8 @@ namespace HSPI_WebHookNotifications
 {
 	public class HSPI : HspiBase
 	{
+		public const string PLUGIN_NAME = "WebHook Notifications";
+		
 		private readonly string[] webhookEndpoints;
 		private readonly HttpClient httpClient;
 		private readonly JavaScriptSerializer jsonSerializer;
@@ -20,7 +22,7 @@ namespace HSPI_WebHookNotifications
 		private const byte TOTAL_WEBHOOK_SLOTS = 5;
 		
 		public HSPI() {
-			Name = "WebHook Notifications";
+			Name = PLUGIN_NAME;
 			PluginIsFree = true;
 
 			httpClient = new HttpClient();
@@ -30,7 +32,7 @@ namespace HSPI_WebHookNotifications
 		}
 
 		public override string InitIO(string port) {
-			Program.WriteLog("verbose", "InitIO");
+			Program.WriteLog(LogType.Verbose, "InitIO");
 
 			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 				webhookEndpoints[i - 1] = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
@@ -71,7 +73,7 @@ namespace HSPI_WebHookNotifications
 
 		public override void HSEvent(Enums.HSEvent eventType, object[] parameters) {
 			if (!IsAnyWebHookConfigured()) {
-				Program.WriteLog("debug",
+				Program.WriteLog(LogType.Debug,
 					"Ignoring event " + eventType + " because no webhook endpoint is configured.");
 				return;
 			}
@@ -98,7 +100,7 @@ namespace HSPI_WebHookNotifications
 				}
 
 				string json = jsonSerializer.Serialize(dict);
-				Program.WriteLog("verbose", json);
+				Program.WriteLog(LogType.Verbose, json);
 
 				for (byte i = 0; i < TOTAL_WEBHOOK_SLOTS; i++) {
 					if (string.IsNullOrEmpty(webhookEndpoints[i])) {
@@ -112,7 +114,7 @@ namespace HSPI_WebHookNotifications
 
 					httpClient.SendAsync(req).ContinueWith((task) => {
 						if (!task.Result.IsSuccessStatusCode) {
-							Program.WriteLog("warn",
+							Program.WriteLog(LogType.Warn,
 								"Got non-successful response code from WebHook " + endpoint + ": " + task.Result.StatusCode);
 						}
 
@@ -121,12 +123,12 @@ namespace HSPI_WebHookNotifications
 				}
 			}
 			catch (Exception ex) {
-				Program.WriteLog("error", ex.ToString());
+				Program.WriteLog(LogType.Error, ex.ToString());
 			}
 		}
 
 		public override string GetPagePlugin(string pageName, string user, int userRights, string queryString) {
-			Program.WriteLog("debug", "Requested page name " + pageName + " by user " + user + " with rights " + userRights);
+			Program.WriteLog(LogType.Debug, "Requested page name " + pageName + " by user " + user + " with rights " + userRights);
 			if (pageName != "WebHookNotificationConfig") {
 				return "Unknown page " + pageName;
 			}
@@ -173,7 +175,7 @@ namespace HSPI_WebHookNotifications
 		}
 		
 		public override string PostBackProc(string pageName, string data, string user, int userRights) {
-			Program.WriteLog("debug", "PostBackProc page name " + pageName + " by user " + user + " with rights " + userRights);
+			Program.WriteLog(LogType.Debug, "PostBackProc page name " + pageName + " by user " + user + " with rights " + userRights);
 			if (pageName != "WebHookNotificationConfig") {
 				return "Unknown page " + pageName;
 			}
@@ -191,11 +193,11 @@ namespace HSPI_WebHookNotifications
 					if (url != null) {
 						webhookEndpoints[i - 1] = url;
 						hs.SaveINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), url, IniFilename);
-						Program.WriteLog("info", "Saved new WebHook URL " + i + ": " + url);
+						Program.WriteLog(LogType.Info, "Saved new WebHook URL " + i + ": " + url);
 					}
 				}
 			} catch (Exception ex) {
-				Program.WriteLog("warn", ex.ToString());
+				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
 
 			return "";
