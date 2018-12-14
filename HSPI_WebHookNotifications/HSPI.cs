@@ -113,6 +113,7 @@ namespace HSPI_WebHookNotifications
 					};
 
 					httpClient.SendAsync(req).ContinueWith((task) => {
+						Program.WriteLog(LogType.Verbose, "Sent WebHook " + endpoint + " with status code " + task.Result.StatusCode);
 						if (!task.Result.IsSuccessStatusCode) {
 							Program.WriteLog(LogType.Warn,
 								"Got non-successful response code from WebHook " + endpoint + ": " + task.Result.StatusCode);
