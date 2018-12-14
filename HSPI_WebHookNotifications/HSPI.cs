@@ -13,9 +13,11 @@ namespace HSPI_WebHookNotifications
 {
 	public class HSPI : HspiBase
 	{
-		private string webhookEndpoint;
+		private readonly string[] webhookEndpoints;
 		private readonly HttpClient httpClient;
 		private readonly JavaScriptSerializer jsonSerializer;
+
+		private const byte TOTAL_WEBHOOK_SLOTS = 5;
 		
 		public HSPI() {
 			Name = "WebHook Notifications";
@@ -23,13 +25,16 @@ namespace HSPI_WebHookNotifications
 
 			httpClient = new HttpClient();
 			jsonSerializer = new JavaScriptSerializer();
+
+			webhookEndpoints = new string[5];
 		}
 
 		public override string InitIO(string port) {
 			Program.WriteLog("verbose", "InitIO");
 
-			webhookEndpoint = hs.GetINISetting("Config", "webhook_endpoint", "", IniFilename);
-			
+			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
+				webhookEndpoints[i - 1] = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
+			}
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_SET, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_CHANGE, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.STRING_CHANGE, Name, InstanceFriendlyName());
@@ -51,7 +56,7 @@ namespace HSPI_WebHookNotifications
 		}
 
 		public override IPlugInAPI.strInterfaceStatus InterfaceStatus() {
-			if (string.IsNullOrEmpty(webhookEndpoint)) {
+			if (!IsAnyWebHookConfigured()) {
 				return new IPlugInAPI.strInterfaceStatus {
 					intStatus = IPlugInAPI.enumInterfaceStatus.WARNING,
 					sStatus = "No WebHook URL is configured"
@@ -65,7 +70,7 @@ namespace HSPI_WebHookNotifications
 		}
 
 		public override void HSEvent(Enums.HSEvent eventType, object[] parameters) {
-			if (string.IsNullOrEmpty(webhookEndpoint)) {
+			if (!IsAnyWebHookConfigured()) {
 				Program.WriteLog("debug",
 					"Ignoring event " + eventType + " because no webhook endpoint is configured.");
 				return;
@@ -94,18 +99,26 @@ namespace HSPI_WebHookNotifications
 
 				string json = jsonSerializer.Serialize(dict);
 				Program.WriteLog("verbose", json);
-				
-				HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, webhookEndpoint) {
-					Content = new StringContent(json, Encoding.UTF8, "application/json")
-				};
 
-				httpClient.SendAsync(req).ContinueWith((task) => {
-					if (!task.Result.IsSuccessStatusCode) {
-						Program.WriteLog("warn", "Got non-successful response code from WebHook: " + task.Result.StatusCode);
+				for (byte i = 0; i < TOTAL_WEBHOOK_SLOTS; i++) {
+					if (string.IsNullOrEmpty(webhookEndpoints[i])) {
+						continue;
 					}
-					
-					task.Result.Dispose();
-				});
+
+					string endpoint = webhookEndpoints[i];
+					HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, endpoint) {
+						Content = new StringContent(json, Encoding.UTF8, "application/json")
+					};
+
+					httpClient.SendAsync(req).ContinueWith((task) => {
+						if (!task.Result.IsSuccessStatusCode) {
+							Program.WriteLog("warn",
+								"Got non-successful response code from WebHook " + endpoint + ": " + task.Result.StatusCode);
+						}
+
+						task.Result.Dispose();
+					});
+				}
 			}
 			catch (Exception ex) {
 				Program.WriteLog("error", ex.ToString());
@@ -129,13 +142,19 @@ namespace HSPI_WebHookNotifications
 
 			stringBuilder.Append(
 				"<table width=\"1000px\" cellspacing=\"0\"><tr><td class=\"tableheader\" colspan=\"2\">Settings</td></tr>");
-			stringBuilder.Append(
-				"<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">WebHook URL:</td>");
-			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
-			
-			clsJQuery.jqTextBox textBox = new clsJQuery.jqTextBox("WebHookUrl", "text", webhookEndpoint, pageName, 100, true);
-			stringBuilder.Append(textBox.Build());
-			stringBuilder.Append("</td></tr></table>");
+
+			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
+				stringBuilder.Append(
+					"<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">WebHook URL " + i + ":</td>");
+				stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
+
+				clsJQuery.jqTextBox textBox =
+					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webhookEndpoints[i - 1], pageName, 100, true);
+				stringBuilder.Append(textBox.Build());
+				stringBuilder.Append("</td></tr>");
+			}
+
+			stringBuilder.Append("</table>");
 
 			clsJQuery.jqButton doneBtn = new clsJQuery.jqButton("DoneBtn", "Done", pageName, false);
 			doneBtn.url = "/";
@@ -166,17 +185,30 @@ namespace HSPI_WebHookNotifications
 
 			try {
 				NameValueCollection postData = HttpUtility.ParseQueryString(data);
-				string url = postData.Get("WebHookUrl");
-				if (url != null) {
-					webhookEndpoint = url;
-					hs.SaveINISetting("Config", "webhook_endpoint", url, IniFilename);
-					Program.WriteLog("info", "Saved new WebHook URL " + url);
+
+				for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
+					string url = postData.Get("WebHookUrl" + i);
+					if (url != null) {
+						webhookEndpoints[i - 1] = url;
+						hs.SaveINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), url, IniFilename);
+						Program.WriteLog("info", "Saved new WebHook URL " + i + ": " + url);
+					}
 				}
 			} catch (Exception ex) {
 				Program.WriteLog("warn", ex.ToString());
 			}
 
 			return "";
+		}
+
+		private bool IsAnyWebHookConfigured() {
+			for (byte i = 0; i < TOTAL_WEBHOOK_SLOTS; i++) {
+				if (!string.IsNullOrEmpty(webhookEndpoints[i])) {
+					return true;
+				}
+			}
+
+			return false;
 		}
 	}
 }
