@@ -8,6 +8,7 @@ using System.Web;
 using System.Web.Script.Serialization;
 using HomeSeerAPI;
 using Scheduler;
+using Scheduler.Classes;
 
 namespace HSPI_WebHookNotifications
 {
@@ -18,6 +19,8 @@ namespace HSPI_WebHookNotifications
 		private readonly string[] webhookEndpoints;
 		private readonly HttpClient httpClient;
 		private readonly JavaScriptSerializer jsonSerializer;
+		private readonly Dictionary<int, bool> deviceRefTimerState;
+		private bool ignoreTimerEvents;
 
 		private const byte TOTAL_WEBHOOK_SLOTS = 5;
 		
@@ -27,6 +30,7 @@ namespace HSPI_WebHookNotifications
 
 			httpClient = new HttpClient();
 			jsonSerializer = new JavaScriptSerializer();
+			deviceRefTimerState = new Dictionary<int, bool>();
 
 			webhookEndpoints = new string[5];
 		}
@@ -37,6 +41,8 @@ namespace HSPI_WebHookNotifications
 			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 				webhookEndpoints[i - 1] = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
 			}
+			ignoreTimerEvents = hs.GetINISetting("Config", "ignore_timer_events", "0", IniFilename) == "1";
+			
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_SET, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_CHANGE, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.STRING_CHANGE, Name, InstanceFriendlyName());
@@ -77,26 +83,50 @@ namespace HSPI_WebHookNotifications
 					"Ignoring event " + eventType + " because no webhook endpoint is configured.");
 				return;
 			}
-			
+
 			Dictionary<string, object> dict = new Dictionary<string, object> {
 				{"eventType", eventType.ToString()}
 			};
 			
 			try {
+				int devRef;
+				
 				switch (eventType) {
 					case Enums.HSEvent.VALUE_SET:
 					case Enums.HSEvent.VALUE_CHANGE:
+						devRef = (int) parameters[4];
 						dict.Add("address", (string) parameters[1]);
 						dict.Add("newValue", ((double) parameters[2]).ToString(CultureInfo.InvariantCulture));
 						dict.Add("oldValue", ((double) parameters[3]).ToString(CultureInfo.InvariantCulture));
-						dict.Add("ref", (int) parameters[4]);
+						dict.Add("ref", devRef);
 						break;
 
 					case Enums.HSEvent.STRING_CHANGE:
+						devRef = (int) parameters[3];
 						dict.Add("address", (string) parameters[1]);
 						dict.Add("newValue", (string) parameters[2]);
-						dict.Add("ref", (int) parameters[3]);
+						dict.Add("ref", devRef);
 						break;
+					
+					default:
+						Program.WriteLog(LogType.Warn, "Unknown event type " + eventType);
+						return;
+				}
+				
+				if (ignoreTimerEvents) {
+					if (!deviceRefTimerState.ContainsKey(devRef)) {
+						// We need to check if this is a timer
+						DeviceClass device = (DeviceClass) hs.GetDeviceByRef(devRef);
+						PlugExtraData.clsPlugExtraData deviceData = device.get_PlugExtraData_Get(hs);
+						deviceRefTimerState[devRef] = deviceData.GetNamed("timername") != null;
+					}
+
+					if (deviceRefTimerState[devRef]) {
+						// This is a timer.
+						Program.WriteLog(LogType.Verbose,
+							"Suppressing " + eventType + " for device " + devRef + " because it's a timer.");
+						return;
+					}
 				}
 
 				string json = jsonSerializer.Serialize(dict);
@@ -157,6 +187,14 @@ namespace HSPI_WebHookNotifications
 				stringBuilder.Append("</td></tr>");
 			}
 
+			stringBuilder.Append(
+				"<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">Ignore Timers:</td>");
+			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
+			clsJQuery.jqCheckBox checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
+				"Suppress WebHooks for HS3 timers", pageName, true, true);
+			stringBuilder.Append(checkBox.Build());
+			stringBuilder.Append("</td></tr>");
+
 			stringBuilder.Append("</table>");
 
 			clsJQuery.jqButton doneBtn = new clsJQuery.jqButton("DoneBtn", "Done", pageName, false);
@@ -197,6 +235,9 @@ namespace HSPI_WebHookNotifications
 						Program.WriteLog(LogType.Info, "Saved new WebHook URL " + i + ": " + url);
 					}
 				}
+
+				ignoreTimerEvents = postData.Get("IgnoreTimerEvents") == "checked";
+				hs.SaveINISetting("Config", "ignore_timer_events", ignoreTimerEvents ? "1" : "0", IniFilename);
 			} catch (Exception ex) {
 				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
