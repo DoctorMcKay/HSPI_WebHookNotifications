@@ -118,7 +118,7 @@ namespace HSPI_WebHookNotifications
 						// We need to check if this is a timer
 						DeviceClass device = (DeviceClass) hs.GetDeviceByRef(devRef);
 						PlugExtraData.clsPlugExtraData deviceData = device.get_PlugExtraData_Get(hs);
-						deviceRefTimerState[devRef] = deviceData.GetNamed("timername") != null;
+						deviceRefTimerState[devRef] = deviceData.GetNamed("timername") != null && device.get_Interface(hs) == "";
 					}
 
 					if (deviceRefTimerState[devRef]) {
