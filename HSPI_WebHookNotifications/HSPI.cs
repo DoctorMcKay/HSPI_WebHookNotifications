@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Globalization;
+using System.Net;
 using System.Net.Http;
+using System.Net.Security;
 using System.Text;
+using System.Threading.Tasks;
 using System.Web;
 using System.Web.Script.Serialization;
 using HomeSeerAPI;
@@ -15,12 +18,15 @@ namespace HSPI_WebHookNotifications
 	public class HSPI : HspiBase
 	{
 		public const string PLUGIN_NAME = "WebHook Notifications";
+
+		private static readonly RemoteCertificateValidationCallback IgnoreInvalidCertificatesCallback = delegate { return true; };
 		
 		private readonly string[] webhookEndpoints;
 		private readonly HttpClient httpClient;
 		private readonly JavaScriptSerializer jsonSerializer;
 		private readonly Dictionary<int, bool> deviceRefTimerState;
 		private bool ignoreTimerEvents;
+		private bool ignoringInvalidCertificates;
 
 		private const byte TOTAL_WEBHOOK_SLOTS = 5;
 		
@@ -42,6 +48,11 @@ namespace HSPI_WebHookNotifications
 				webhookEndpoints[i - 1] = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
 			}
 			ignoreTimerEvents = hs.GetINISetting("Config", "ignore_timer_events", "0", IniFilename) == "1";
+			ignoringInvalidCertificates = hs.GetINISetting("Config", "ignore_invalid_certificates", "0", IniFilename) == "1";
+
+			if (ignoringInvalidCertificates) {
+				ServicePointManager.ServerCertificateValidationCallback += IgnoreInvalidCertificatesCallback;
+			}
 			
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_SET, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_CHANGE, Name, InstanceFriendlyName());
@@ -150,12 +161,28 @@ namespace HSPI_WebHookNotifications
 						}
 
 						task.Result.Dispose();
-					});
+					}).ContinueWith((task) => {
+						if (task.Exception?.InnerException != null) {
+							Program.WriteLog(LogType.Error, string.Format(
+								"Unable to send WebHook {0}: {1}",
+								endpoint,
+								getInnerExceptionMessage(task.Exception)
+							));
+						}
+					}, TaskContinuationOptions.OnlyOnFaulted);
 				}
 			}
 			catch (Exception ex) {
 				Program.WriteLog(LogType.Error, ex.ToString());
 			}
+		}
+
+		private string getInnerExceptionMessage(Exception ex) {
+			if (ex.InnerException != null) {
+				return getInnerExceptionMessage(ex.InnerException);
+			}
+
+			return ex.Message;
 		}
 
 		public override string GetPagePlugin(string pageName, string user, int userRights, string queryString) {
@@ -192,6 +219,13 @@ namespace HSPI_WebHookNotifications
 			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
 			clsJQuery.jqCheckBox checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
 				"Suppress WebHooks for HS3 timers", pageName, true, true);
+			stringBuilder.Append(checkBox.Build());
+			stringBuilder.Append("</td></tr>");
+			
+			stringBuilder.Append("<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">Ignore Invalid HTTPS Certificates:</td>");
+			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
+			checkBox = new clsJQuery.jqCheckBox("IgnoreInvalidCertificates",
+				"Don't fail requests if an invalid certificate is encountered", pageName, true, true);
 			stringBuilder.Append(checkBox.Build());
 			stringBuilder.Append("</td></tr>");
 
@@ -237,7 +271,17 @@ namespace HSPI_WebHookNotifications
 				}
 
 				ignoreTimerEvents = postData.Get("IgnoreTimerEvents") == "checked";
+				bool wasIgnoringCertificates = ignoringInvalidCertificates;
+				ignoringInvalidCertificates = postData.Get("IgnoreInvalidCertificates") == "checked";
+				
 				hs.SaveINISetting("Config", "ignore_timer_events", ignoreTimerEvents ? "1" : "0", IniFilename);
+				hs.SaveINISetting("Config", "ignore_invalid_certificates", ignoringInvalidCertificates ? "1" : "0", IniFilename);
+
+				if (wasIgnoringCertificates && !ignoringInvalidCertificates) {
+					ServicePointManager.ServerCertificateValidationCallback -= IgnoreInvalidCertificatesCallback;
+				} else if (!wasIgnoringCertificates && ignoringInvalidCertificates) {
+					ServicePointManager.ServerCertificateValidationCallback += IgnoreInvalidCertificatesCallback;
+				}
 			} catch (Exception ex) {
 				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
