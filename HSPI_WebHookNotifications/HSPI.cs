@@ -18,41 +18,38 @@ namespace HSPI_WebHookNotifications
 	public class HSPI : HspiBase
 	{
 		public const string PLUGIN_NAME = "WebHook Notifications";
-
-		private static readonly RemoteCertificateValidationCallback IgnoreInvalidCertificatesCallback = delegate { return true; };
 		
-		private readonly string[] webhookEndpoints;
-		private readonly HttpClient httpClient;
 		private readonly JavaScriptSerializer jsonSerializer;
 		private readonly Dictionary<int, bool> deviceRefTimerState;
 		private bool ignoreTimerEvents;
 		private bool ignoringInvalidCertificates;
+		
+		private readonly WebHook[] webHooks;
 
 		private const byte TOTAL_WEBHOOK_SLOTS = 5;
 		
 		public HSPI() {
 			Name = PLUGIN_NAME;
 			PluginIsFree = true;
-
-			httpClient = new HttpClient();
+			
 			jsonSerializer = new JavaScriptSerializer();
 			deviceRefTimerState = new Dictionary<int, bool>();
 
-			webhookEndpoints = new string[5];
+			webHooks = new WebHook[TOTAL_WEBHOOK_SLOTS];
 		}
 
 		public override string InitIO(string port) {
 			Program.WriteLog(LogType.Verbose, "InitIO");
 
-			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
-				webhookEndpoints[i - 1] = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
-			}
-			ignoreTimerEvents = hs.GetINISetting("Config", "ignore_timer_events", "0", IniFilename) == "1";
 			ignoringInvalidCertificates = hs.GetINISetting("Config", "ignore_invalid_certificates", "0", IniFilename) == "1";
-
-			if (ignoringInvalidCertificates) {
-				ServicePointManager.ServerCertificateValidationCallback += IgnoreInvalidCertificatesCallback;
+			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
+				string url = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
+				webHooks[i - 1] = url.Length > 0
+					? new WebHook(url) { CheckServerCertificate = !ignoringInvalidCertificates }
+					: null;
 			}
+			
+			ignoreTimerEvents = hs.GetINISetting("Config", "ignore_timer_events", "0", IniFilename) == "1";
 			
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_SET, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_CHANGE, Name, InstanceFriendlyName());
@@ -144,20 +141,17 @@ namespace HSPI_WebHookNotifications
 				Program.WriteLog(LogType.Verbose, json);
 
 				for (byte i = 0; i < TOTAL_WEBHOOK_SLOTS; i++) {
-					if (string.IsNullOrEmpty(webhookEndpoints[i])) {
+					if (webHooks[i] == null) {
 						continue;
 					}
 
-					string endpoint = webhookEndpoints[i];
-					HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, endpoint) {
-						Content = new StringContent(json, Encoding.UTF8, "application/json")
-					};
-
-					httpClient.SendAsync(req).ContinueWith((task) => {
-						Program.WriteLog(LogType.Verbose, "Sent WebHook " + endpoint + " with status code " + task.Result.StatusCode);
+					WebHook webHook = webHooks[i];
+					
+					webHook.Execute(new StringContent(json, Encoding.UTF8, "application/json")).ContinueWith((task) => {
+						Program.WriteLog(LogType.Verbose, "Sent WebHook " + webHook + " with status code " + task.Result.StatusCode);
 						if (!task.Result.IsSuccessStatusCode) {
 							Program.WriteLog(LogType.Warn,
-								"Got non-successful response code from WebHook " + endpoint + ": " + task.Result.StatusCode);
+								"Got non-successful response code from WebHook " + webHook + ": " + task.Result.StatusCode);
 						}
 
 						task.Result.Dispose();
@@ -165,7 +159,7 @@ namespace HSPI_WebHookNotifications
 						if (task.Exception?.InnerException != null) {
 							Program.WriteLog(LogType.Error, string.Format(
 								"Unable to send WebHook {0}: {1}",
-								endpoint,
+								webHook,
 								getInnerExceptionMessage(task.Exception)
 							));
 						}
@@ -209,7 +203,7 @@ namespace HSPI_WebHookNotifications
 				stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
 
 				clsJQuery.jqTextBox textBox =
-					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webhookEndpoints[i - 1], pageName, 100, true);
+					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webHooks[i - 1].ToString(), pageName, 100, true);
 				stringBuilder.Append(textBox.Build());
 				stringBuilder.Append("</td></tr>");
 			}
@@ -261,27 +255,28 @@ namespace HSPI_WebHookNotifications
 			try {
 				NameValueCollection postData = HttpUtility.ParseQueryString(data);
 
+				ignoringInvalidCertificates = postData.Get("IgnoreInvalidCertificates") == "checked";
+				
 				for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 					string url = postData.Get("WebHookUrl" + i);
-					if (url != null) {
-						webhookEndpoints[i - 1] = url;
+					if (webHooks[i - 1] != null) {
+						webHooks[i - 1].Dispose();
+						webHooks[i - 1] = null;
+					}
+					
+					if (url?.Length > 0) {
+						webHooks[i - 1] = new WebHook(url) {
+							CheckServerCertificate = !ignoringInvalidCertificates
+						};
 						hs.SaveINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), url, IniFilename);
 						Program.WriteLog(LogType.Info, "Saved new WebHook URL " + i + ": " + url);
 					}
 				}
 
 				ignoreTimerEvents = postData.Get("IgnoreTimerEvents") == "checked";
-				bool wasIgnoringCertificates = ignoringInvalidCertificates;
-				ignoringInvalidCertificates = postData.Get("IgnoreInvalidCertificates") == "checked";
 				
 				hs.SaveINISetting("Config", "ignore_timer_events", ignoreTimerEvents ? "1" : "0", IniFilename);
 				hs.SaveINISetting("Config", "ignore_invalid_certificates", ignoringInvalidCertificates ? "1" : "0", IniFilename);
-
-				if (wasIgnoringCertificates && !ignoringInvalidCertificates) {
-					ServicePointManager.ServerCertificateValidationCallback -= IgnoreInvalidCertificatesCallback;
-				} else if (!wasIgnoringCertificates && ignoringInvalidCertificates) {
-					ServicePointManager.ServerCertificateValidationCallback += IgnoreInvalidCertificatesCallback;
-				}
 			} catch (Exception ex) {
 				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
@@ -291,7 +286,7 @@ namespace HSPI_WebHookNotifications
 
 		private bool IsAnyWebHookConfigured() {
 			for (byte i = 0; i < TOTAL_WEBHOOK_SLOTS; i++) {
-				if (!string.IsNullOrEmpty(webhookEndpoints[i])) {
+				if (webHooks[i] != null) {
 					return true;
 				}
 			}
