@@ -213,6 +213,7 @@ namespace HSPI_WebHookNotifications
 			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
 			clsJQuery.jqCheckBox checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
 				"Suppress WebHooks for HS3 timers", pageName, true, true);
+			checkBox.@checked = ignoreTimerEvents;
 			stringBuilder.Append(checkBox.Build());
 			stringBuilder.Append("</td></tr>");
 			
@@ -220,6 +221,7 @@ namespace HSPI_WebHookNotifications
 			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
 			checkBox = new clsJQuery.jqCheckBox("IgnoreInvalidCertificates",
 				"Don't fail requests if an invalid certificate is encountered", pageName, true, true);
+			checkBox.@checked = ignoringInvalidCertificates;
 			stringBuilder.Append(checkBox.Build());
 			stringBuilder.Append("</td></tr>");
 
