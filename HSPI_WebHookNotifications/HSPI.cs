@@ -203,7 +203,7 @@ namespace HSPI_WebHookNotifications
 				stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
 
 				clsJQuery.jqTextBox textBox =
-					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webHooks[i - 1].ToString(), pageName, 100, true);
+					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webHooks[i - 1]?.ToString(), pageName, 100, true);
 				stringBuilder.Append(textBox.Build());
 				stringBuilder.Append("</td></tr>");
 			}
