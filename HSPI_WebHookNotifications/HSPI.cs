@@ -22,7 +22,6 @@ namespace HSPI_WebHookNotifications
 		private readonly JavaScriptSerializer jsonSerializer;
 		private readonly Dictionary<int, bool> deviceRefTimerState;
 		private bool ignoreTimerEvents;
-		private bool ignoringInvalidCertificates;
 		
 		private readonly WebHook[] webHooks;
 
@@ -41,11 +40,20 @@ namespace HSPI_WebHookNotifications
 		public override string InitIO(string port) {
 			Program.WriteLog(LogType.Verbose, "InitIO");
 
-			ignoringInvalidCertificates = hs.GetINISetting("Config", "ignore_invalid_certificates", "0", IniFilename) == "1";
+			bool ignoreCertificateLegacy = hs.GetINISetting("Config", "ignore_invalid_certificates", "0", IniFilename) == "1";
+			if (ignoreCertificateLegacy) {
+				hs.SaveINISetting("Config", "ignore_invalid_certificates", "", IniFilename);
+			}
+			
 			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
+				if (ignoreCertificateLegacy) {
+					hs.SaveINISetting("IgnoreCertificate", "webhook" + i, "1", IniFilename);
+				}
+				
 				string url = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
+				bool ignoreCertificate = hs.GetINISetting("IgnoreCertificate", "webhook" + i, "0", IniFilename) == "1";
 				webHooks[i - 1] = url.Length > 0
-					? new WebHook(url) { CheckServerCertificate = !ignoringInvalidCertificates }
+					? new WebHook(url) { CheckServerCertificate = !ignoreCertificate }
 					: null;
 			}
 			
@@ -185,9 +193,17 @@ namespace HSPI_WebHookNotifications
 				return "Unknown page " + pageName;
 			}
 
+			PageBuilderAndMenu.clsPageBuilder pageBuilder = new PageBuilderAndMenu.clsPageBuilder(pageName);
+			
 			if ((userRights & 2) != 2) {
 				// User is not an admin
-				return "Access denied: you are not an administrative user.";
+				pageBuilder.reset();
+				pageBuilder.AddHeader(hs.GetPageHeader(pageName, "WebHook Notifications Settings", "", "", false, true));
+				pageBuilder.AddBody("<p><strong>Access Denied:</strong> You are not an administrative user.</p>");
+				pageBuilder.AddFooter(hs.GetPageFooter());
+				pageBuilder.suppressDefaultFooter = true;
+
+				return pageBuilder.BuildPage();
 			}
 
 			StringBuilder stringBuilder = new StringBuilder();
@@ -195,33 +211,32 @@ namespace HSPI_WebHookNotifications
 				PageBuilderAndMenu.clsPageBuilder.FormStart("whn_config_form", "whn_config_form", "post"));
 
 			stringBuilder.Append(
-				"<table width=\"1000px\" cellspacing=\"0\"><tr><td class=\"tableheader\" colspan=\"2\">Settings</td></tr>");
+				"<table width=\"1000px\" cellspacing=\"0\"><tr><td class=\"tableheader\" colspan=\"3\">Settings</td></tr>");
 
+			clsJQuery.jqCheckBox checkBox;
 			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 				stringBuilder.Append(
-					"<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">WebHook URL " + i + ":</td>");
-				stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
+					"<tr><td class=\"tablecell\" style=\"width:200px\" align=\"left\">WebHook URL " + i + ":</td>");
+				stringBuilder.Append("<td class=\"tablecell\">");
 
 				clsJQuery.jqTextBox textBox =
 					new clsJQuery.jqTextBox("WebHookUrl" + i, "text", webHooks[i - 1]?.ToString(), pageName, 100, true);
 				stringBuilder.Append(textBox.Build());
+				stringBuilder.Append("</td><td class=\"tablecell\" style=\"width:300px\">");
+				
+				checkBox = new clsJQuery.jqCheckBox("IgnoreInvalidCertificate" + i, "Ignore invalid HTTPS certificate", pageName, true, true);
+				checkBox.@checked = hs.GetINISetting("IgnoreCertificate", "webhook" + i, "0", IniFilename) == "1";
+				stringBuilder.Append(checkBox.Build());
+				
 				stringBuilder.Append("</td></tr>");
 			}
 
 			stringBuilder.Append(
-				"<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">Ignore Timers:</td>");
-			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
-			clsJQuery.jqCheckBox checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
+				"<tr><td class=\"tablecell\" style=\"width:200px\" align=\"left\">Ignore Timers:</td>");
+			stringBuilder.Append("<td class=\"tablecell\" colspan=\"2\">");
+			checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
 				"Suppress WebHooks for HS3 timers", pageName, true, true);
 			checkBox.@checked = ignoreTimerEvents;
-			stringBuilder.Append(checkBox.Build());
-			stringBuilder.Append("</td></tr>");
-			
-			stringBuilder.Append("<tr><td class=\"tablecell\" colspan=\"1\" style=\"width:300px\" align=\"left\">Ignore Invalid HTTPS Certificates:</td>");
-			stringBuilder.Append("<td class=\"tablecell\" colspan=\"1\">");
-			checkBox = new clsJQuery.jqCheckBox("IgnoreInvalidCertificates",
-				"Don't fail requests if an invalid certificate is encountered", pageName, true, true);
-			checkBox.@checked = ignoringInvalidCertificates;
 			stringBuilder.Append(checkBox.Build());
 			stringBuilder.Append("</td></tr>");
 
@@ -233,7 +248,6 @@ namespace HSPI_WebHookNotifications
 			stringBuilder.Append(doneBtn.Build());
 			stringBuilder.Append("<br /><br />");
 			
-			PageBuilderAndMenu.clsPageBuilder pageBuilder = new PageBuilderAndMenu.clsPageBuilder(pageName);
 			pageBuilder.reset();
 			pageBuilder.AddHeader(hs.GetPageHeader(pageName, "WebHook Notifications Settings", "", "", false, true));
 			pageBuilder.AddBody(stringBuilder.ToString());
@@ -256,8 +270,6 @@ namespace HSPI_WebHookNotifications
 
 			try {
 				NameValueCollection postData = HttpUtility.ParseQueryString(data);
-
-				ignoringInvalidCertificates = postData.Get("IgnoreInvalidCertificates") == "checked";
 				
 				for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 					string url = postData.Get("WebHookUrl" + i);
@@ -266,19 +278,21 @@ namespace HSPI_WebHookNotifications
 						webHooks[i - 1] = null;
 					}
 					
+					bool ignoreCertificate = postData.Get("IgnoreInvalidCertificate" + i) == "checked";
+					hs.SaveINISetting("IgnoreCertificate", "webhook" + i, ignoreCertificate ? "1" : "0", IniFilename);
+					
 					if (url?.Length > 0) {
 						webHooks[i - 1] = new WebHook(url) {
-							CheckServerCertificate = !ignoringInvalidCertificates
+							CheckServerCertificate = !ignoreCertificate
 						};
 						hs.SaveINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), url, IniFilename);
-						Program.WriteLog(LogType.Info, "Saved new WebHook URL " + i + ": " + url);
+						Program.WriteLog(LogType.Info, "Saved new WebHook URL " + i + ": " + url + " (ignore certificate: " + ignoreCertificate + ")");
 					}
 				}
 
 				ignoreTimerEvents = postData.Get("IgnoreTimerEvents") == "checked";
 				
 				hs.SaveINISetting("Config", "ignore_timer_events", ignoreTimerEvents ? "1" : "0", IniFilename);
-				hs.SaveINISetting("Config", "ignore_invalid_certificates", ignoringInvalidCertificates ? "1" : "0", IniFilename);
 			} catch (Exception ex) {
 				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
