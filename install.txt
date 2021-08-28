@@ -1,0 +1,2 @@
+HSPI_WebHookNotifications.exe,.,0
+HSPI_WebHookNotifications.exe.config,.,0
