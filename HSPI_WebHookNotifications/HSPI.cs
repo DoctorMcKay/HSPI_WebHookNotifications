@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Globalization;
-using System.Net;
+using System.Linq;
 using System.Net.Http;
-using System.Net.Security;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web;
@@ -22,14 +21,18 @@ namespace HSPI_WebHookNotifications
 		private readonly JavaScriptSerializer jsonSerializer;
 		private readonly Dictionary<int, bool> deviceRefTimerState;
 		private bool ignoreTimerEvents;
+		private bool ignoreUnchangedEvents;
 		
 		private readonly WebHook[] webHooks;
+		private int[] ignoredDeviceRefs;
 
 		private const byte TOTAL_WEBHOOK_SLOTS = 5;
-		
+
 		public HSPI() {
 			Name = PLUGIN_NAME;
 			PluginIsFree = true;
+			PluginSupportsConfigDevice = true;
+			PluginSupportsConfigDeviceAll = true;
 			
 			jsonSerializer = new JavaScriptSerializer();
 			deviceRefTimerState = new Dictionary<int, bool>();
@@ -44,25 +47,27 @@ namespace HSPI_WebHookNotifications
 			if (ignoreCertificateLegacy) {
 				hs.SaveINISetting("Config", "ignore_invalid_certificates", "", IniFilename);
 			}
-			
+
 			for (byte i = 1; i <= TOTAL_WEBHOOK_SLOTS; i++) {
 				if (ignoreCertificateLegacy) {
 					hs.SaveINISetting("IgnoreCertificate", "webhook" + i, "1", IniFilename);
 				}
-				
+
 				string url = hs.GetINISetting("Config", "webhook_endpoint" + (i == 1 ? "" : i.ToString()), "", IniFilename);
 				bool ignoreCertificate = hs.GetINISetting("IgnoreCertificate", "webhook" + i, "0", IniFilename) == "1";
 				webHooks[i - 1] = url.Length > 0
 					? new WebHook(url) { CheckServerCertificate = !ignoreCertificate }
 					: null;
 			}
-			
+
 			ignoreTimerEvents = hs.GetINISetting("Config", "ignore_timer_events", "0", IniFilename) == "1";
-			
+			ignoreUnchangedEvents = hs.GetINISetting("Config", "ignore_unchanged_events", "0", IniFilename) == "1";
+			_updateIgnoredDeviceRefs();
+
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_SET, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.VALUE_CHANGE, Name, InstanceFriendlyName());
 			callbacks.RegisterEventCB(Enums.HSEvent.STRING_CHANGE, Name, InstanceFriendlyName());
-			
+
 			// Config page
 			hs.RegisterPage("WebHookNotificationConfig", Name, InstanceFriendlyName());
 			WebPageDesc configLink = new WebPageDesc {
@@ -95,8 +100,7 @@ namespace HSPI_WebHookNotifications
 
 		public override void HSEvent(Enums.HSEvent eventType, object[] parameters) {
 			if (!IsAnyWebHookConfigured()) {
-				Program.WriteLog(LogType.Debug,
-					"Ignoring event " + eventType + " because no webhook endpoint is configured.");
+				Program.WriteLog(LogType.Debug, "Ignoring event " + eventType + " because no webhook endpoint is configured.");
 				return;
 			}
 
@@ -111,6 +115,10 @@ namespace HSPI_WebHookNotifications
 					case Enums.HSEvent.VALUE_SET:
 					case Enums.HSEvent.VALUE_CHANGE:
 						devRef = (int) parameters[4];
+						if (ignoreUnchangedEvents && (double)parameters[2] == (double)parameters[3]) {
+							Program.WriteLog(LogType.Verbose, $"Suppressing {eventType} for device {devRef} because its value did not change ({(double)parameters[2]} == {(double)parameters[3]})");
+							return;
+						}
 						dict.Add("address", (string) parameters[1]);
 						dict.Add("newValue", ((double) parameters[2]).ToString(CultureInfo.InvariantCulture));
 						dict.Add("oldValue", ((double) parameters[3]).ToString(CultureInfo.InvariantCulture));
@@ -128,6 +136,11 @@ namespace HSPI_WebHookNotifications
 						Program.WriteLog(LogType.Warn, "Unknown event type " + eventType);
 						return;
 				}
+
+				if (ignoredDeviceRefs.Contains(devRef)) {
+					Program.WriteLog(LogType.Verbose, $"Suppressing {eventType} for device {devRef} because it is ignored.");
+					return;
+				}
 				
 				if (ignoreTimerEvents) {
 					if (!deviceRefTimerState.ContainsKey(devRef)) {
@@ -139,8 +152,7 @@ namespace HSPI_WebHookNotifications
 
 					if (deviceRefTimerState[devRef]) {
 						// This is a timer.
-						Program.WriteLog(LogType.Verbose,
-							"Suppressing " + eventType + " for device " + devRef + " because it's a timer.");
+						Program.WriteLog(LogType.Verbose, $"Suppressing {eventType} for device {devRef} because it's a timer.");
 						return;
 					}
 				}
@@ -158,18 +170,13 @@ namespace HSPI_WebHookNotifications
 					webHook.Execute(new StringContent(json, Encoding.UTF8, "application/json")).ContinueWith((task) => {
 						Program.WriteLog(LogType.Verbose, "Sent WebHook " + webHook + " with status code " + task.Result.StatusCode);
 						if (!task.Result.IsSuccessStatusCode) {
-							Program.WriteLog(LogType.Warn,
-								"Got non-successful response code from WebHook " + webHook + ": " + task.Result.StatusCode);
+							Program.WriteLog(LogType.Warn, "Got non-successful response code from WebHook " + webHook + ": " + task.Result.StatusCode);
 						}
 
 						task.Result.Dispose();
 					}).ContinueWith((task) => {
 						if (task.Exception?.InnerException != null) {
-							Program.WriteLog(LogType.Error, string.Format(
-								"Unable to send WebHook {0}: {1}",
-								webHook,
-								getInnerExceptionMessage(task.Exception)
-							));
+							Program.WriteLog(LogType.Error, $"Unable to send WebHook {webHook}: {getInnerExceptionMessage(task.Exception)}");
 						}
 					}, TaskContinuationOptions.OnlyOnFaulted);
 				}
@@ -185,6 +192,53 @@ namespace HSPI_WebHookNotifications
 			}
 
 			return ex.Message;
+		}
+		
+		public override string ConfigDevice(int @ref, string user, int userRights, bool newDevice) {
+			if ((userRights & 2) != 2) {
+				// User is not an admin
+				return "<p><strong>Access Denied:</strong> You are not an administrative user.</p>";
+			}
+			
+			bool deviceIsExempt = hs.GetINISetting("IgnoreDeviceRefs", @ref.ToString(), "", IniFilename) == "1";
+			StringBuilder stringBuilder = new StringBuilder();
+			stringBuilder.Append(PageBuilderAndMenu.clsPageBuilder.FormStart("whn_device_config_form", "whn_device_config_form", "post"));
+
+			clsJQuery.jqCheckBox checkBox = new clsJQuery.jqCheckBox("ignore_device", "Don't send webhook notifications for this feature", "deviceutility", true, true);
+			checkBox.@checked = deviceIsExempt;
+			stringBuilder.Append(checkBox.Build());
+
+			stringBuilder.Append(PageBuilderAndMenu.clsPageBuilder.FormEnd());
+
+			return stringBuilder.ToString();
+		}
+
+		public override Enums.ConfigDevicePostReturn ConfigDevicePost(int @ref, string data, string user, int userRights) {
+			if ((userRights & 2) != 2) {
+				// User is not an admin
+				return Enums.ConfigDevicePostReturn.DoneAndCancel;
+			}
+
+			try {
+				NameValueCollection postData = HttpUtility.ParseQueryString(data);
+				bool deviceIsExempt = postData.Get("ignore_device") == "checked";
+				hs.SaveINISetting("IgnoreDeviceRefs", @ref.ToString(), deviceIsExempt ? "1" : "", IniFilename);
+				_updateIgnoredDeviceRefs();
+				return Enums.ConfigDevicePostReturn.DoneAndCancelAndStay;
+			} catch (Exception ex) {
+				Program.WriteLog(LogType.Warn, ex.ToString());
+				return Enums.ConfigDevicePostReturn.DoneAndCancelAndStay;
+			}
+		}
+
+		private void _updateIgnoredDeviceRefs() {
+			string[] ignoredRefs = hs.GetINISectionEx("IgnoreDeviceRefs", IniFilename);
+			ignoredDeviceRefs = new int[ignoredRefs.Length];
+			for (int i = 0; i < ignoredRefs.Length; i++) {
+				ignoredDeviceRefs[i] = int.Parse(ignoredRefs[i].Split('=')[0]);
+			}
+			
+			Program.WriteLog(LogType.Verbose, $"Loaded {ignoredDeviceRefs.Length} ignored devices");
 		}
 
 		public override string GetPagePlugin(string pageName, string user, int userRights, string queryString) {
@@ -231,15 +285,32 @@ namespace HSPI_WebHookNotifications
 				stringBuilder.Append("</td></tr>");
 			}
 
-			stringBuilder.Append(
-				"<tr><td class=\"tablecell\" style=\"width:200px\" align=\"left\">Ignore Timers:</td>");
+			stringBuilder.Append("<tr><td class=\"tablecell\" style=\"width:200px\" align=\"left\"></td>");
 			stringBuilder.Append("<td class=\"tablecell\" colspan=\"2\">");
-			checkBox = new clsJQuery.jqCheckBox("IgnoreTimerEvents",
-				"Suppress WebHooks for HS3 timers", pageName, true, true);
+			checkBox = new clsJQuery.jqCheckBox(
+				"IgnoreTimerEvents",
+				"Suppress WebHooks for HS3 timers",
+				pageName,
+				true,
+				true
+			);
 			checkBox.@checked = ignoreTimerEvents;
 			stringBuilder.Append(checkBox.Build());
 			stringBuilder.Append("</td></tr>");
 
+			stringBuilder.Append("<tr><td class=\"tablecell\" style=\"width:250px\" align=\"left\"></td>");
+			stringBuilder.Append("<td class=\"tablecell\" colspan=\"2\">");
+			checkBox = new clsJQuery.jqCheckBox(
+				"IgnoreUnchangedEvents",
+				"Suppress WebHooks for events in which a device's value did not change (not effective on STRING_CHANGE events)",
+				pageName,
+				true,
+				true
+			);
+			checkBox.@checked = ignoreUnchangedEvents;
+			stringBuilder.Append(checkBox.Build());
+			stringBuilder.Append("</td></tr>");
+			
 			stringBuilder.Append("</table>");
 
 			clsJQuery.jqButton doneBtn = new clsJQuery.jqButton("DoneBtn", "Done", pageName, false);
@@ -291,8 +362,10 @@ namespace HSPI_WebHookNotifications
 				}
 
 				ignoreTimerEvents = postData.Get("IgnoreTimerEvents") == "checked";
+				ignoreUnchangedEvents = postData.Get("IgnoreUnchangedEvents") == "checked";
 				
 				hs.SaveINISetting("Config", "ignore_timer_events", ignoreTimerEvents ? "1" : "0", IniFilename);
+				hs.SaveINISetting("Config", "ignore_unchanged_events", ignoreUnchangedEvents ? "1" : "0", IniFilename);
 			} catch (Exception ex) {
 				Program.WriteLog(LogType.Warn, ex.ToString());
 			}
