@@ -1,0 +1,50 @@
+name: CI
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v1
+    
+    - name: Setup msbuild
+      uses: microsoft/setup-msbuild@v1
+      
+    - name: Setup nuget
+      uses: nuget/setup-nuget@v1
+      
+    - name: Nuget restore
+      run: nuget restore HSPI_WebHookNotifications.sln
+      
+    - name: MSBuild
+      run: |
+        msbuild /p:Configuration=Debug HSPI_WebHookNotifications.sln
+        msbuild /p:Configuration=Release HSPI_WebHookNotifications.sln
+        
+    - name: Stage artifacts
+      run: |
+        mkdir artifacts
+        cp HSPI_WebHookNotifications\bin\Release\HSPI_WebHookNotifications.exe artifacts\HSPI_WebHookNotifications.exe
+        cp HSPI_WebHookNotifications.exe.config artifacts\HSPI_WebHookNotifications.exe.config
+        cp install.txt artifacts\install.txt
+    
+    - name: Stage debug artifacts
+      run: |
+        mkdir artifacts-debug
+        cp HSPI_WebHookNotifications\bin\Debug\HSPI_WebHookNotifications.exe "artifacts-debug\HSPI_WebHookNotifications.exe"
+        cp HSPI_WebHookNotifications.exe.config artifacts-debug\HSPI_WebHookNotifications.exe.config
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: Plugin
+        path: artifacts
+    
+    - name: Upload debug artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: Debug Build
+        path: artifacts-debug
